@@ -86,6 +86,6 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(5000, () => {
+server.listen(() => {
   console.log(`Socket server is running.`);
 });
