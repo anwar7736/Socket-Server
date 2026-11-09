@@ -7,12 +7,38 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = createServer(app);
-const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:3001,http://127.0.0.1:3001")
+const localOrigins = ["http://localhost:3001", "http://127.0.0.1:3001"];
+const configuredOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const allowedOrigins = configuredOrigins.length
+  ? configuredOrigins
+  : process.env.NODE_ENV === "production"
+    ? []
+    : localOrigins;
+if (!allowedOrigins.length) {
+  throw new Error("Set CORS_ORIGINS to the exact frontend origin(s) before starting in production.");
+}
+for (const origin of allowedOrigins) {
+  if (new URL(origin).origin !== origin) {
+    throw new Error(`CORS_ORIGINS must contain exact origins without paths or trailing slashes: ${origin}`);
+  }
+}
+if (
+  process.env.NODE_ENV === "production" &&
+  (!process.env.AUTH_SECRET || process.env.AUTH_SECRET.length < 32)
+) {
+  throw new Error("Set AUTH_SECRET to the same value as the frontend, at least 32 characters long.");
+}
+const allowedOriginSet = new Set(allowedOrigins);
+const isAllowedOrigin = (origin) => !origin || allowedOriginSet.has(origin);
 const io = new Server(server, {
-  cors: { origin: allowedOrigins, credentials: true },
+  cors: {
+    origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
+    credentials: false,
+  },
+  allowRequest: (request, callback) => callback(null, isAllowedOrigin(request.headers.origin)),
   maxHttpBufferSize: 1e6,
   pingTimeout: 20000,
 });
@@ -55,6 +81,35 @@ function decodeSession(cookieHeader) {
   }
 }
 
+function decodeSocketToken(token) {
+  if (typeof token !== "string") return null;
+
+  const [userId, expiration, signature, ...rest] = token.split(".");
+  if (
+    rest.length ||
+    !/^[a-f\d]{24}$/i.test(userId || "") ||
+    !/^\d+$/.test(expiration || "") ||
+    Number(expiration) <= Math.floor(Date.now() / 1000)
+  ) return null;
+
+  const secret =
+    process.env.AUTH_SECRET ||
+    (process.env.NODE_ENV !== "production" && "local-development-only-secret-change-before-deploy");
+  if (!secret || (process.env.NODE_ENV === "production" && secret.length < 32)) return null;
+
+  try {
+    const expected = createHmac("sha256", secret)
+      .update(`socket:${userId}.${expiration}`)
+      .digest();
+    const provided = Buffer.from(signature.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    return expected.length === provided.length && timingSafeEqual(expected, provided)
+      ? userId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function parsePayload(data) {
   try {
     return typeof data === "string" ? JSON.parse(data) : data;
@@ -69,7 +124,9 @@ function emitToUser(userId, event, payload) {
 }
 
 io.use((socket, next) => {
-  const userId = decodeSession(socket.request.headers.cookie);
+  const userId =
+    decodeSocketToken(socket.handshake.auth?.token) ||
+    decodeSession(socket.request.headers.cookie);
   if (!userId) return next(new Error("unauthorized"));
   socket.data.userId = userId;
   next();
