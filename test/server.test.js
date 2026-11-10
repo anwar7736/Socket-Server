@@ -125,6 +125,54 @@ test("a deleted message's text never travels", async () => {
   [a, b, c].forEach((s) => s.disconnect());
 });
 
+test("a group deletion reaches every selected member without message content", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const deletedId = "e".repeat(24);
+  const messageId = "f".repeat(24);
+  const deliveries = Promise.all([next(b, "message-deleted"), next(c, "message-deleted")]);
+  a.emit("message-deleted", {
+    _id: deletedId,
+    message_id: messageId,
+    sender: { _id: A },
+    receiver: { _id: "d".repeat(24) },
+    recipient_ids: [B],
+    message: "must not be sent",
+  });
+  const [toMember, toOutsider] = await deliveries;
+  assert.equal(toMember.message_id, messageId);
+  assert.equal(toMember.message, undefined);
+  assert.equal(toOutsider, "none");
+  [a, b, c].forEach((socket) => socket.disconnect());
+});
+
+test("message reactions require a signed event and reach only listed recipients", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const event = {
+    actor_id: A,
+    message_id: "e".repeat(24),
+    recipient_ids: [B],
+    reactions: [{ user_id: A, emoji: "👍" }],
+  };
+  const unsigned = Promise.all([next(b, "message-reaction"), next(c, "message-reaction")]);
+  a.emit("message-reaction", event);
+  assert.deepEqual(await unsigned, ["none", "none"]);
+
+  const signedEvent = { ...event, issuedAt: Date.now() };
+  signedEvent.signature = createHmac("sha256", SECRET)
+    .update(JSON.stringify({ event, issuedAt: signedEvent.issuedAt }))
+    .digest("base64url");
+  const received = Promise.all([next(b, "message-reaction"), next(c, "message-reaction")]);
+  a.emit("message-reaction", signedEvent);
+  const [toRecipient, toOutsider] = await received;
+  assert.deepEqual(toRecipient, { message_id: event.message_id, reactions: event.reactions });
+  assert.equal(toOutsider, "none");
+  [a, b, c].forEach((socket) => socket.disconnect());
+});
+
 test("leaving a group is announced to its members only", async () => {
   const group = "d".repeat(24);
   const a = await connect(A);
@@ -167,6 +215,20 @@ test("call: every tab rings, answering on one stops the other, hanging up ends i
   a.emit("call:end", { callId });
   assert.equal((await ended).callId, callId);
   [a, b1, b2].forEach((s) => s.disconnect());
+});
+
+test("call: a caller receives a busy result when every recipient is already ringing", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const incoming = next(b, "call:invite");
+  a.emit("call:invite", { callId: randomUUID(), recipients: [B], callerName: "A" });
+  await incoming;
+
+  const unavailable = next(c, "call:unavailable");
+  c.emit("call:invite", { callId: randomUUID(), recipients: [B], callerName: "C" });
+  assert.equal((await unavailable).reason, "busy");
+  [a, b, c].forEach((socket) => socket.disconnect());
 });
 
 test("call: hanging up before an answer stops the ringing", async () => {
@@ -223,6 +285,20 @@ test("presence: a user stays online while another tab is open", async () => {
   const secondClose = next(b, "active-users");
   a2.disconnect();
   assert.ok(!(await secondClose).includes(A));
+  b.disconnect();
+});
+
+test("presence: logout takes every tab offline immediately", async () => {
+  const a1 = await connect(A);
+  const a2 = await connect(A);
+  const b = await connect(B);
+  const updatedPresence = next(b, "active-users");
+  const firstDisconnected = next(a1, "disconnect");
+  const secondDisconnected = next(a2, "disconnect");
+  a1.emit("user-logout");
+  assert.ok(!(await updatedPresence).includes(A));
+  assert.notEqual(await firstDisconnected, "none");
+  assert.notEqual(await secondDisconnected, "none");
   b.disconnect();
 });
 

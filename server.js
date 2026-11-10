@@ -181,6 +181,8 @@ io.on("connection", (socket) => {
   socket.on("user-logout", () => {
     onlineUsers.delete(userId);
     socket.broadcast.emit("active-users", Array.from(onlineUsers));
+    // A logout applies to the whole signed-in user, not just the current tab.
+    setImmediate(() => io.in(userRoom(userId)).disconnectSockets(true));
   });
 
   // Only ids travel here; the app loads the message itself through its authorised API.
@@ -205,10 +207,45 @@ io.on("connection", (socket) => {
     const payload = parsePayload(data);
     const receiverId = payload?.receiver?._id;
     if (payload?.sender?._id !== userId || !isObjectId(payload._id)) return;
-    socket.to(roomsFor([userId, receiverId])).emit("message-deleted", {
+    const recipients = Array.isArray(payload.recipient_ids)
+      ? payload.recipient_ids
+      : [receiverId];
+    socket.to(roomsFor([userId, ...recipients])).emit("message-deleted", {
       _id: payload._id,
+      ...(isObjectId(payload.message_id) ? { message_id: payload.message_id } : {}),
       sender: { _id: userId },
       receiver: { _id: isObjectId(receiverId) ? receiverId : null },
+    });
+  });
+
+  socket.on("message-reaction", (data) => {
+    const payload = parsePayload(data);
+    const secret =
+      process.env.AUTH_SECRET ||
+      (process.env.NODE_ENV !== "production" && "local-development-only-secret-change-before-deploy");
+    const { signature, issuedAt, ...event } = payload || {};
+    if (!secret || typeof signature !== "string" || !Number.isSafeInteger(issuedAt) || Math.abs(Date.now() - issuedAt) > 30_000) return;
+    const expected = createHmac("sha256", secret)
+      .update(JSON.stringify({ event, issuedAt }))
+      .digest();
+    let provided;
+    try {
+      provided = Buffer.from(signature, "base64url");
+    } catch {
+      return;
+    }
+    if (
+      expected.length !== provided.length ||
+      !timingSafeEqual(expected, provided) ||
+      event?.actor_id !== userId ||
+      !isObjectId(event.message_id) ||
+      !Array.isArray(event.recipient_ids) ||
+      !Array.isArray(event.reactions) ||
+      event.reactions.some((reaction) => !isObjectId(reaction?.user_id) || !["👍", "❤️", "😂", "😮", "😢", "🙏"].includes(reaction?.emoji))
+    ) return;
+    socket.to(roomsFor(event.recipient_ids)).emit("message-reaction", {
+      message_id: event.message_id,
+      reactions: event.reactions.slice(0, MAX_RECIPIENTS),
     });
   });
 
@@ -258,20 +295,26 @@ io.on("connection", (socket) => {
       invite.recipients.length > MAX_CALL_PARTICIPANTS - 1
     ) return;
 
+    if (findCallForUser(userId)) {
+      socket.emit("call:busy", { callId: invite.callId, userId });
+      return;
+    }
+
     const invited = new Set([userId]);
+    const availableRecipients = [];
+    let busyRecipients = 0;
     for (const recipientId of invite.recipients) {
       if (!isObjectId(recipientId) || recipientId === userId || !onlineUsers.has(recipientId)) continue;
+      if (findCallForUser(recipientId)) {
+        busyRecipients += 1;
+        socket.emit("call:busy", { callId: invite.callId, userId: recipientId });
+        continue;
+      }
       invited.add(recipientId);
-      emitToUser(recipientId, "call:invite", {
-        callId: invite.callId,
-        callerId: userId,
-        callerName: String(invite.callerName || "Someone").slice(0, 80),
-        conversationName: String(invite.conversationName || "").slice(0, 80),
-        isVideo: Boolean(invite.isVideo),
-      });
+      availableRecipients.push(recipientId);
     }
     if (invited.size === 1) {
-      socket.emit("call:unavailable", { callId: invite.callId });
+      socket.emit("call:unavailable", { callId: invite.callId, reason: busyRecipients ? "busy" : "offline" });
       return;
     }
     const timer = setTimeout(() => endCall(invite.callId, null, "no-answer"), CALL_MAX_RING_MS);
@@ -283,6 +326,16 @@ io.on("connection", (socket) => {
       sockets: new Map([[userId, socket.id]]),
       timer,
     });
+    for (const recipientId of availableRecipients) {
+      emitToUser(recipientId, "call:invite", {
+        callId: invite.callId,
+        callerId: userId,
+        callerName: String(invite.callerName || "Someone").slice(0, 80),
+        conversationName: String(invite.conversationName || "").slice(0, 80),
+        isVideo: Boolean(invite.isVideo),
+      });
+    }
+    socket.emit("call:ringing", { callId: invite.callId });
   });
 
   socket.on("call:accept", (data) => {
@@ -367,6 +420,13 @@ function emitToCallMember(call, memberId, event, payload) {
   const socketId = call.sockets.get(memberId);
   if (socketId) io.to(socketId).emit(event, payload);
   else emitToUser(memberId, event, payload);
+}
+
+function findCallForUser(userId) {
+  for (const call of calls.values()) {
+    if (call.invited.has(userId) && !call.rejected.has(userId)) return call;
+  }
+  return null;
 }
 
 // One participant leaves; with fewer than two people left the call ends for everyone.
