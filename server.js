@@ -55,6 +55,10 @@ const EVENT_RATE = 30;
 // most users one event may be sent to (groups are limited to 100 members)
 const MAX_RECIPIENTS = 200;
 const objectIdPattern = /^[a-f\d]{24}$/i;
+const isEmoji = (value) =>
+  typeof value === "string" &&
+  value.length <= 32 &&
+  /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(value);
 
 app.get("/", (_request, response) => {
   response.status(200).json({ status: "ok", service: "socket-server" });
@@ -180,6 +184,7 @@ io.on("connection", (socket) => {
 
   socket.on("user-logout", () => {
     onlineUsers.delete(userId);
+    socket.broadcast.emit("user-offline", { user_id: userId, last_seen_at: new Date().toISOString() });
     socket.broadcast.emit("active-users", Array.from(onlineUsers));
     // A logout applies to the whole signed-in user, not just the current tab.
     setImmediate(() => io.in(userRoom(userId)).disconnectSockets(true));
@@ -200,6 +205,65 @@ io.on("connection", (socket) => {
     }
     const recipients = isGroup ? payload.recipient_ids : [payload.receiver_id];
     socket.to(roomsFor([userId, ...recipients])).emit("private-message", event);
+  });
+
+  socket.on("typing-status", (data) => {
+    const payload = parsePayload(data);
+    if (
+      payload?.sender_id !== userId ||
+      !isObjectId(payload.receiver_id) ||
+      typeof payload.is_group !== "boolean" ||
+      typeof payload.typing !== "boolean"
+    ) return;
+    const recipients = payload.is_group
+      ? Array.isArray(payload.recipient_ids) ? payload.recipient_ids : []
+      : [payload.receiver_id];
+    socket.to(roomsFor(recipients.filter((id) => id !== userId))).emit("typing-status", {
+      sender_id: userId,
+      sender_name: String(payload.sender_name || "Someone").slice(0, 80),
+      receiver_id: payload.receiver_id,
+      is_group: payload.is_group,
+      typing: payload.typing,
+    });
+  });
+
+  socket.on("messages-seen", (data) => {
+    const payload = parsePayload(data);
+    const secret =
+      process.env.AUTH_SECRET ||
+      (process.env.NODE_ENV !== "production" && "local-development-only-secret-change-before-deploy");
+    const { signature, issuedAt, ...event } = payload || {};
+    if (
+      !secret ||
+      typeof signature !== "string" ||
+      !Number.isSafeInteger(issuedAt) ||
+      Math.abs(Date.now() - issuedAt) > 30_000 ||
+      event?.actor_id !== userId ||
+      !Array.isArray(event.message_ids) ||
+      !event.message_ids.length ||
+      event.message_ids.length > 200 ||
+      event.message_ids.some((id) => !isObjectId(id)) ||
+      !Array.isArray(event.recipient_ids) ||
+      !event.recipient_ids.length ||
+      event.recipient_ids.length > MAX_RECIPIENTS ||
+      event.recipient_ids.some((id) => !isObjectId(id))
+    ) return;
+    const expected = createHmac("sha256", secret)
+      .update(JSON.stringify({ event, issuedAt }))
+      .digest();
+    let provided;
+    try {
+      provided = Buffer.from(signature, "base64url");
+    } catch {
+      return;
+    }
+    if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) return;
+    socket.to(roomsFor(event.recipient_ids)).emit("messages-seen", {
+      actor_id: userId,
+      actor_name: String(event.actor_name || "Someone").slice(0, 80),
+      actor_photo: String(event.actor_photo || "").slice(0, 180),
+      message_ids: event.message_ids,
+    });
   });
 
   // Only the ids of the removed message, never its text or attachment.
@@ -241,7 +305,7 @@ io.on("connection", (socket) => {
       !isObjectId(event.message_id) ||
       !Array.isArray(event.recipient_ids) ||
       !Array.isArray(event.reactions) ||
-      event.reactions.some((reaction) => !isObjectId(reaction?.user_id) || !["👍", "❤️", "😂", "😮", "😢", "🙏"].includes(reaction?.emoji))
+      event.reactions.some((reaction) => !isObjectId(reaction?.user_id) || !isEmoji(reaction?.emoji))
     ) return;
     socket.to(roomsFor(event.recipient_ids)).emit("message-reaction", {
       message_id: event.message_id,
@@ -399,6 +463,7 @@ io.on("connection", (socket) => {
     }
     if (isOnline(userId)) return; // another tab of this user is still open
     if (onlineUsers.delete(userId)) {
+      socket.broadcast.emit("user-offline", { user_id: userId, last_seen_at: new Date().toISOString() });
       socket.broadcast.emit("active-users", Array.from(onlineUsers));
     }
   });

@@ -186,6 +186,63 @@ test("leaving a group is announced to its members only", async () => {
   [a, b, c].forEach((s) => s.disconnect());
 });
 
+test("typing status is routed only to the selected recipient", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const got = Promise.all([next(b, "typing-status"), next(c, "typing-status")]);
+  a.emit("typing-status", {
+    sender_id: A,
+    sender_name: "A",
+    receiver_id: B,
+    is_group: false,
+    typing: true,
+  });
+  const [toRecipient, toStranger] = await got;
+  assert.deepEqual(toRecipient, {
+    sender_id: A,
+    sender_name: "A",
+    receiver_id: B,
+    is_group: false,
+    typing: true,
+  });
+  assert.equal(toStranger, "none");
+  [a, b, c].forEach((s) => s.disconnect());
+});
+
+test("seen receipts require a valid signature and reach only the message sender", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const messageId = "e".repeat(24);
+  const event = {
+    actor_id: B,
+    actor_name: "B",
+    actor_photo: "",
+    message_ids: [messageId],
+    recipient_ids: [A],
+  };
+  const invalid = Promise.all([next(a, "messages-seen"), next(c, "messages-seen")]);
+  b.emit("messages-seen", event);
+  assert.deepEqual(await invalid, ["none", "none"]);
+
+  const signedEvent = { ...event, issuedAt: Date.now() };
+  signedEvent.signature = createHmac("sha256", SECRET)
+    .update(JSON.stringify({ event, issuedAt: signedEvent.issuedAt }))
+    .digest("base64url");
+  const deliveries = Promise.all([next(a, "messages-seen"), next(c, "messages-seen")]);
+  b.emit("messages-seen", signedEvent);
+  const [toSender, toStranger] = await deliveries;
+  assert.deepEqual(toSender, {
+    actor_id: B,
+    actor_name: "B",
+    actor_photo: "",
+    message_ids: [messageId],
+  });
+  assert.equal(toStranger, "none");
+  [a, b, c].forEach((s) => s.disconnect());
+});
+
 test("call: every tab rings, answering on one stops the other, hanging up ends it", async () => {
   const a = await connect(A);
   const b1 = await connect(B);
