@@ -48,7 +48,7 @@ const onlineUsers = new Set();
 const calls = new Map();
 const MAX_CALL_PARTICIPANTS = 8;
 // an unanswered call stops ringing after this long
-const CALL_MAX_RING_MS = 60 * 1000;
+const CALL_MAX_RING_MS = 7 * 1000;
 // per socket: a burst of events (a group call sends many ICE candidates at once), then a steady rate
 const EVENT_BURST = 300;
 const EVENT_RATE = 30;
@@ -313,6 +313,40 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("message-edited", (data) => {
+    const payload = parsePayload(data);
+    const secret =
+      process.env.AUTH_SECRET ||
+      (process.env.NODE_ENV !== "production" && "local-development-only-secret-change-before-deploy");
+    const { signature, issuedAt, ...event } = payload || {};
+    if (!secret || typeof signature !== "string" || !Number.isSafeInteger(issuedAt) || Math.abs(Date.now() - issuedAt) > 30_000) return;
+    const expected = createHmac("sha256", secret)
+      .update(JSON.stringify({ event, issuedAt }))
+      .digest();
+    let provided;
+    try {
+      provided = Buffer.from(signature, "base64url");
+    } catch {
+      return;
+    }
+    if (
+      expected.length !== provided.length ||
+      !timingSafeEqual(expected, provided) ||
+      event?.actor_id !== userId ||
+      !isObjectId(event.message_id) ||
+      typeof event.message !== "string" ||
+      event.message.length > 5000 ||
+      typeof event.editedAt !== "string" ||
+      !Array.isArray(event.recipient_ids) ||
+      event.recipient_ids.some((id) => !isObjectId(id))
+    ) return;
+    socket.to(roomsFor(event.recipient_ids)).emit("message-edited", {
+      message_id: event.message_id,
+      message: event.message,
+      editedAt: event.editedAt,
+    });
+  });
+
   socket.on("add-group", (data) => {
     const payload = parsePayload(data);
     if (payload?.created_by !== userId || !Array.isArray(payload.group_members)) return;
@@ -449,6 +483,26 @@ io.on("connection", (socket) => {
       from: userId,
       signal: payload.signal,
     });
+  });
+
+  socket.on("call:media-status", (data) => {
+    const payload = parsePayload(data);
+    const call = calls.get(payload?.callId);
+    if (
+      !call?.accepted.has(userId) ||
+      call.sockets.get(userId) !== socket.id ||
+      typeof payload.muted !== "boolean" ||
+      typeof payload.cameraOff !== "boolean"
+    ) return;
+    for (const participantId of call.accepted) {
+      if (participantId === userId) continue;
+      emitToCallMember(call, participantId, "call:media-status", {
+        callId: payload.callId,
+        userId,
+        muted: payload.muted,
+        cameraOff: payload.cameraOff,
+      });
+    }
   });
 
   socket.on("call:end", (data) => {

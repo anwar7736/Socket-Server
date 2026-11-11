@@ -173,6 +173,33 @@ test("message reactions require a signed event and reach only listed recipients"
   [a, b, c].forEach((socket) => socket.disconnect());
 });
 
+test("message edits require a signed event and reach only listed recipients", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const event = {
+    actor_id: A,
+    message_id: "e".repeat(24),
+    message: "edited text",
+    editedAt: new Date().toISOString(),
+    recipient_ids: [B],
+  };
+  const signedEvent = { ...event, issuedAt: Date.now() };
+  signedEvent.signature = createHmac("sha256", SECRET)
+    .update(JSON.stringify({ event, issuedAt: signedEvent.issuedAt }))
+    .digest("base64url");
+  const deliveries = Promise.all([next(b, "message-edited"), next(c, "message-edited")]);
+  a.emit("message-edited", signedEvent);
+  const [toRecipient, toOutsider] = await deliveries;
+  assert.deepEqual(toRecipient, {
+    message_id: event.message_id,
+    message: event.message,
+    editedAt: event.editedAt,
+  });
+  assert.equal(toOutsider, "none");
+  [a, b, c].forEach((socket) => socket.disconnect());
+});
+
 test("leaving a group is announced to its members only", async () => {
   const group = "d".repeat(24);
   const a = await connect(A);
@@ -247,6 +274,7 @@ test("call: every tab rings, answering on one stops the other, hanging up ends i
   const a = await connect(A);
   const b1 = await connect(B);
   const b2 = await connect(B);
+  const c = await connect(C);
   const callId = randomUUID();
   const rings = Promise.all([next(b1, "call:invite"), next(b2, "call:invite")]);
   a.emit("call:invite", {
@@ -270,6 +298,12 @@ test("call: every tab rings, answering on one stops the other, hanging up ends i
   assert.equal(peerForA.userId, B);
   assert.equal(peerForB.userId, A);
 
+  const mediaStatus = Promise.all([next(a, "call:media-status"), next(c, "call:media-status")]);
+  b1.emit("call:media-status", { callId, muted: true, cameraOff: true });
+  const [toCaller, toOutsider] = await mediaStatus;
+  assert.deepEqual(toCaller, { callId, userId: B, muted: true, cameraOff: true });
+  assert.equal(toOutsider, "none");
+
   // signalling goes to the answering tab only
   const signal = Promise.all([next(b1, "call:signal"), next(b2, "call:signal")]);
   a.emit("call:signal", { callId, to: B, signal: { description: { type: "offer", sdp: "x" } } });
@@ -280,7 +314,7 @@ test("call: every tab rings, answering on one stops the other, hanging up ends i
   const ended = next(b1, "call:end");
   a.emit("call:end", { callId });
   assert.equal((await ended).callId, callId);
-  [a, b1, b2].forEach((s) => s.disconnect());
+  [a, b1, b2, c].forEach((s) => s.disconnect());
 });
 
 test("call: a caller receives a busy result when every recipient is already ringing", async () => {
