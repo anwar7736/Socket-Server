@@ -48,7 +48,7 @@ const onlineUsers = new Set();
 const calls = new Map();
 const MAX_CALL_PARTICIPANTS = 8;
 // an unanswered call stops ringing after this long
-const CALL_MAX_RING_MS = 7 * 1000;
+const CALL_MAX_RING_MS = 45 * 1000; // an unanswered call rings this long, then ends as "no-answer" (like WhatsApp)
 // per socket: a burst of events (a group call sends many ICE candidates at once), then a steady rate
 const EVENT_BURST = 300;
 const EVENT_RATE = 30;
