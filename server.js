@@ -396,6 +396,8 @@ io.on("connection", (socket) => {
         callerId: userId,
         callerName: String(invite.callerName || "Someone").slice(0, 80),
         conversationName: String(invite.conversationName || "").slice(0, 80),
+        conversationId: isObjectId(invite.conversationId) ? invite.conversationId : "",
+        isGroup: Boolean(invite.isGroup),
         isVideo: Boolean(invite.isVideo),
       });
     }

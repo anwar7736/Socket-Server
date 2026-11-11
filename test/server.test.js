@@ -249,9 +249,18 @@ test("call: every tab rings, answering on one stops the other, hanging up ends i
   const b2 = await connect(B);
   const callId = randomUUID();
   const rings = Promise.all([next(b1, "call:invite"), next(b2, "call:invite")]);
-  a.emit("call:invite", { callId, recipients: [B], callerName: "A", isVideo: true });
+  a.emit("call:invite", {
+    callId,
+    recipients: [B],
+    callerName: "A",
+    isVideo: true,
+    conversationId: B,
+    isGroup: false,
+  });
   const [ring1, ring2] = await rings;
   assert.equal(ring1.callId, callId);
+  assert.equal(ring1.conversationId, B);
+  assert.equal(ring1.isGroup, false);
   assert.equal(ring2.callId, callId);
 
   const after = Promise.all([next(b2, "call:end"), next(a, "call:participant"), next(b1, "call:participant")]);
