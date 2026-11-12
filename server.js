@@ -282,6 +282,44 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("call-log-deleted", (data) => {
+    const payload = parsePayload(data);
+    const secret =
+      process.env.AUTH_SECRET ||
+      (process.env.NODE_ENV !== "production" && "local-development-only-secret-change-before-deploy");
+    const { signature, issuedAt, ...event } = payload || {};
+    if (
+      !secret ||
+      typeof signature !== "string" ||
+      !Number.isSafeInteger(issuedAt) ||
+      Math.abs(Date.now() - issuedAt) > 30_000 ||
+      event?.actor_id !== userId ||
+      typeof event.callId !== "string" ||
+      !/^[a-f\d-]{36}$/i.test(event.callId) ||
+      !isObjectId(event.conversation_id) ||
+      typeof event.is_group !== "boolean" ||
+      !Array.isArray(event.recipient_ids) ||
+      !event.recipient_ids.length ||
+      event.recipient_ids.length > MAX_RECIPIENTS ||
+      event.recipient_ids.some((id) => !isObjectId(id))
+    ) return;
+    const expected = createHmac("sha256", secret)
+      .update(JSON.stringify({ event, issuedAt }))
+      .digest();
+    let provided;
+    try {
+      provided = Buffer.from(signature, "base64url");
+    } catch {
+      return;
+    }
+    if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) return;
+    socket.to(roomsFor(event.recipient_ids)).emit("call-log-deleted", {
+      callId: event.callId,
+      conversation_id: event.conversation_id,
+      is_group: event.is_group,
+    });
+  });
+
   socket.on("message-reaction", (data) => {
     const payload = parsePayload(data);
     const secret =
