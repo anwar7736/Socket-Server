@@ -48,7 +48,10 @@ const onlineUsers = new Set();
 const calls = new Map();
 const MAX_CALL_PARTICIPANTS = 8;
 // an unanswered call stops ringing after this long
-const CALL_MAX_RING_MS = 45 * 1000; // an unanswered call rings this long, then ends as "no-answer" (like WhatsApp)
+// An unanswered call keeps ringing until the caller cancels or someone answers/declines (like WhatsApp/Messenger);
+// the caller closing the app or losing the connection still ends it at once. This is only a safety stop for a call
+// left ringing on an unattended phone.
+const CALL_MAX_RING_MS = 10 * 60 * 1000;
 // per socket: a burst of events (a group call sends many ICE candidates at once), then a steady rate
 const EVENT_BURST = 300;
 const EVENT_RATE = 30;
