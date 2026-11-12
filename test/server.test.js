@@ -244,6 +244,37 @@ test("call log deletion requires a signed event and reaches only listed particip
   [a, b, c].forEach((s) => s.disconnect());
 });
 
+test("call log updates require a signed event and reach only listed participants", async () => {
+  const a = await connect(A);
+  const b = await connect(B);
+  const c = await connect(C);
+  const event = {
+    actor_id: A,
+    callId: randomUUID(),
+    conversation_id: "d".repeat(24),
+    is_group: false,
+    recipient_ids: [A, B],
+  };
+  const unsigned = Promise.all([next(b, "call-log-updated"), next(c, "call-log-updated")]);
+  a.emit("call-log-updated", event);
+  assert.deepEqual(await unsigned, ["none", "none"]);
+
+  const signedEvent = { ...event, issuedAt: Date.now() };
+  signedEvent.signature = createHmac("sha256", SECRET)
+    .update(JSON.stringify({ event, issuedAt: signedEvent.issuedAt }))
+    .digest("base64url");
+  const deliveries = Promise.all([next(b, "call-log-updated"), next(c, "call-log-updated")]);
+  a.emit("call-log-updated", signedEvent);
+  const [toParticipant, toStranger] = await deliveries;
+  assert.deepEqual(toParticipant, {
+    callId: event.callId,
+    conversation_id: event.conversation_id,
+    is_group: false,
+  });
+  assert.equal(toStranger, "none");
+  [a, b, c].forEach((s) => s.disconnect());
+});
+
 test("typing status is routed only to the selected recipient", async () => {
   const a = await connect(A);
   const b = await connect(B);
