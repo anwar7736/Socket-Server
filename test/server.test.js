@@ -225,6 +225,32 @@ test("typing status is routed only to the selected recipient", async () => {
     is_group: false,
     typing: true,
   });
+
+  test("group typing status reaches listed members and not outsiders", async () => {
+    const a = await connect(A);
+    const b = await connect(B);
+    const c = await connect(C);
+    const groupId = "d".repeat(24);
+    const got = Promise.all([next(b, "typing-status"), next(c, "typing-status")]);
+    a.emit("typing-status", {
+      sender_id: A,
+      sender_name: "A",
+      receiver_id: groupId,
+      is_group: true,
+      recipient_ids: [A, B],
+      typing: true,
+    });
+    const [toMember, toOutsider] = await got;
+    assert.deepEqual(toMember, {
+      sender_id: A,
+      sender_name: "A",
+      receiver_id: groupId,
+      is_group: true,
+      typing: true,
+    });
+    assert.equal(toOutsider, "none");
+    [a, b, c].forEach((socket) => socket.disconnect());
+  });
   const [toRecipient, toStranger] = await got;
   assert.deepEqual(toRecipient, {
     sender_id: A,
